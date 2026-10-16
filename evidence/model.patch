@@ -3260,29 +3260,29 @@ index 000000000..4e91e6b80
 +无缓存专项测试：shared/addon 重复 10 次通过；shared/addon -race 通过；forge addon、log addon 与 services 测试通过。cmd/server 因仓库缺少 web/dist 触发既有 go:embed 构建前置条件而未进入测试。可控真实子进程审计稳定复现首次 unexpected EOF 后单次失效上报未清空 current。
 diff --git a/evidence/verify-rubric.yaml b/evidence/verify-rubric.yaml
 new file mode 100644
-index 000000000..40b923c5b
+index 000000000..4df5f0b2a
 --- /dev/null
 +++ b/evidence/verify-rubric.yaml
 @@ -0,0 +1,19 @@
 +rubrics:
 +  - id: 1
 +    type: f2p
-+    text: "forge addon 子进程被终止后，当前 RPC 调用只返回一次原始失败且不会被隐式重放；下一次独立调用可通过新进程恢复。"
++    text: forge addon 子进程被终止后，当前 RPC 调用只返回一次原始失败且不会被隐式重放；下一次独立调用可通过新进程恢复。
 +  - id: 2
 +    type: f2p
-+    text: "log addon 在 LogAppend、LogFind、LogDelete 或 StepFinished 路径发生进程退出时遵守相同换代规则，结果不确定的写调用不得自动重复执行。"
++    text: log addon 在 LogAppend、LogFind、LogDelete 或 StepFinished 路径发生进程退出时遵守相同换代规则，结果不确定的写调用不得自动重复执行。
 +  - id: 3
 +    type: f2p
-+    text: "同一 addon 失效后并发请求只启动一个替代进程并共享该恢复结果；替代进程持续无法启动时，请求有界失败且后续请求仍可重新尝试。"
++    text: 同一 addon 失效后并发请求只启动一个替代进程并共享该恢复结果；替代进程持续无法启动时，请求有界失败且后续请求仍可重新尝试。
 +  - id: 4
 +    type: f2p
-+    text: "服务器关闭开始后不再启动 addon，正在使用或替换中的 forge 与日志 addon 都被收敛并回收，关闭后无残留子进程。"
++    text: 服务器关闭开始后不再启动 addon，正在使用或替换中的 forge 与日志 addon 都被收敛并回收，关闭后无残留子进程。
 +  - id: 5
 +    type: f2p
-+    text: "forge 缓存和全局日志服务不会继续暴露已死亡的 RPC generation，也不会在关闭后重新填充或复活 addon。"
++    text: forge 缓存和全局日志服务不会继续暴露已死亡的 RPC generation，也不会在关闭后重新填充或复活 addon。
 +  - id: 6
 +    type: p2p
-+    text: "未配置 addon 时，内置 forge、数据库日志和文件日志的现有调用与关闭行为保持不变，仓库既有相关测试不回归。"
++    text: 未配置 addon 时，内置 forge、数据库日志和文件日志的现有调用与关闭行为保持不变，仓库既有相关测试不回归。
 diff --git a/server/forge/addon/client.go b/server/forge/addon/client.go
 index 4ed1db7ee..863b4a1d3 100644
 --- a/server/forge/addon/client.go
