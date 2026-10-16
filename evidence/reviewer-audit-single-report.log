@@ -1,0 +1,7 @@
+{"level":"info","addon":"test-addon","time":"2026-10-16T08:26:37+08:00","message":"addon subprocess started"}
+{"level":"debug","addon":"test-addon","time":"2026-10-16T08:26:38+08:00","message":"all addon subprocesses reaped"}
+--- FAIL: TestReviewerSingleFailureReportInvalidatesCrash (1.46s)
+    reviewer_single_report_test.go:23: iteration 0: one production-style ReportFailure left crashed generation current; error=*errors.errorString unexpected EOF; rpc.ErrShutdown=false
+FAIL
+FAIL	go.woodpecker-ci.org/woodpecker/v3/shared/addon	6.042s
+FAIL

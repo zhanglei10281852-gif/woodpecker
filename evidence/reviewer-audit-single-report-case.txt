@@ -1,0 +1,15 @@
+审计目的：验证生产路径只调用一次 ReportFailure 时，子进程崩溃是否立即使当前 generation 失效。
+
+临时测试核心步骤：
+1. 使用 helperStarter 启动真实 go-plugin 子进程。
+2. 调用 Plugin.Crash，子进程在回复前退出。
+3. 仅调用一次 m.ReportFailure(cli, err)，与 forge/log 的 callRPC 生产路径一致。
+4. 检查 m.current 是否已经清空。
+
+执行命令：
+go test -count=1 -run TestReviewerSingleFailureReportInvalidatesCrash ./shared/addon
+
+实际结果：
+Plugin.Crash 返回 unexpected EOF；一次 ReportFailure 后 m.current 仍非空，测试在 iteration 0 稳定失败。
+生产影响：
+下一次独立调用通过 Current 取得同一个死亡 RPC client，再次失败后才会命中 rpc.ErrShutdown 或 Exited 条件并清空 generation。

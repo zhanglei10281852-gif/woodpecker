@@ -44,12 +44,16 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/web"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/addon"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/logger"
 	"go.woodpecker-ci.org/woodpecker/v3/version"
 )
 
 const (
 	shutdownTimeout = time.Second * 5
+	// AddonShutdownTimeout must cover an in-flight addon restart (bounded by
+	// addon.DefaultStartTimeout) plus the graceful-kill grace of go-plugin.
+	addonShutdownTimeout = 45 * time.Second
 )
 
 var (
@@ -121,6 +125,19 @@ func run(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("can't setup globals: %w", err)
 	}
+
+	// Reap every forge/log addon subprocess (current instances as well as
+	// any instance replaced at runtime) when the server exits. ShutdownAll
+	// also blocks new addon processes from starting once shutdown has begun.
+	defer func() {
+		log.Info().Msg("shutting down forge and log addon subprocesses ...")
+		// detach from the already-canceled server ctx: reaping must run to completion
+		addonCtx, addonCancel := context.WithTimeout(context.WithoutCancel(ctx), addonShutdownTimeout)
+		defer addonCancel()
+		if err := addon.ShutdownAll(addonCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down addon subprocesses")
+		}
+	}()
 
 	// wait for all services until one do stops with an error
 	serviceWaitingGroup := errgroup.Group{}

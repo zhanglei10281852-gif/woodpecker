@@ -1,0 +1,1 @@
+无缓存专项测试：shared/addon 重复 10 次通过；shared/addon -race 通过；forge addon、log addon 与 services 测试通过。cmd/server 因仓库缺少 web/dist 触发既有 go:embed 构建前置条件而未进入测试。可控真实子进程审计稳定复现首次 unexpected EOF 后单次失效上报未清空 current。

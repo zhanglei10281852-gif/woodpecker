@@ -17,6 +17,7 @@ package addon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/rpc"
@@ -28,46 +29,94 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	shared_addon "go.woodpecker-ci.org/woodpecker/v3/shared/addon"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/logger"
 )
 
 // make sure RPC implements forge.Forge.
-var _ forge.Forge = new(RPC)
+var _ forge.Forge = (*RPC)(nil)
 
+// Load starts the forge addon subprocess owned by a lifecycle Manager and
+// returns a stable forge.Forge wrapper. If the subprocess exits later, calls
+// fail with the original RPC error until a following request restarts it; all
+// spawned subprocesses are reaped when the server shuts down.
 func Load(file string) (forge.Forge, error) {
-	client := plugin.NewClient(&plugin.ClientConfig{
-		HandshakeConfig: HandshakeConfig,
-		Plugins: map[string]plugin.Plugin{
-			pluginKey: &Plugin{},
-		},
-		Cmd: exec.Command(file),
-		Logger: &logger.AddonClientLogger{
-			Logger: log.With().Str("addon", file).Logger(),
-		},
-	})
-	// TODO: defer client.Kill()
+	frontend := &RPC{}
+	// Register only after the initial start succeeded: a misconfigured addon
+	// must fail startup without leaving an ownerless manager behind.
+	manager := shared_addon.NewManager(
+		"forge addon: "+file,
+		func() (*rpc.Client, *plugin.Client, error) {
+			var conn *rpc.Client
+			client := plugin.NewClient(&plugin.ClientConfig{
+				HandshakeConfig: HandshakeConfig,
+				Plugins: map[string]plugin.Plugin{
+					pluginKey: &hostPlugin{bind: func(c *rpc.Client) { conn = c }},
+				},
+				Cmd:          exec.Command(file),
+				StartTimeout: shared_addon.DefaultStartTimeout,
+				Logger: &logger.AddonClientLogger{
+					Logger: log.With().Str("addon", file).Logger(),
+				},
+			})
 
-	rpcClient, err := client.Client()
-	if err != nil {
+			rpcClient, err := client.Client()
+			if err != nil {
+				client.Kill()
+				return nil, nil, err
+			}
+			if _, err = rpcClient.Dispense(pluginKey); err != nil {
+				client.Kill()
+				return nil, nil, err
+			}
+			if conn == nil {
+				client.Kill()
+				return nil, nil, errors.New("forge addon dispensed without an rpc connection")
+			}
+			return conn, client, nil
+		},
+		shared_addon.WithoutGlobalRegistry(),
+	)
+	frontend.m = manager
+
+	// eagerly fail server startup when the addon can not be started at all
+	if _, err := manager.Current(); err != nil {
 		return nil, err
 	}
+	manager.Register()
 
-	raw, err := rpcClient.Dispense(pluginKey)
-	if err != nil {
-		return nil, err
-	}
-
-	extension, _ := raw.(forge.Forge)
-	return extension, nil
+	return frontend, nil
 }
 
+// RPC is the stable, concurrency-safe forge.Forge frontend. The backing
+// subprocess (and therefore its net/rpc client) may be replaced by the
+// Manager after a crash; this wrapper itself stays valid.
 type RPC struct {
-	client *rpc.Client
+	m *shared_addon.Manager
+}
+
+// callRPC invokes an addon method on the current subprocess. A call that
+// fails because the subprocess exited returns the original error without any
+// replay: the Manager only records the dead connection so the next call can
+// restart the addon.
+func callRPC[T any](m *shared_addon.Manager, serviceMethod string, args any) (T, error) {
+	var zero T
+
+	client, err := m.Current()
+	if err != nil {
+		return zero, err
+	}
+
+	var resp T
+	if err = client.Call(serviceMethod, args, &resp); err != nil {
+		m.ReportFailure(client, err)
+		return zero, err
+	}
+	return resp, nil
 }
 
 func (g *RPC) Name() string {
-	var resp string
-	err := g.client.Call("Plugin.Name", []byte{}, &resp)
+	resp, err := callRPC[string](g.m, "Plugin.Name", []byte{})
 	if err != nil {
 		log.Error().Err(err).Msg("addon Plugin.Name call failed")
 	}
@@ -75,8 +124,7 @@ func (g *RPC) Name() string {
 }
 
 func (g *RPC) URL() string {
-	var resp string
-	err := g.client.Call("Plugin.URL", []byte{}, &resp)
+	resp, err := callRPC[string](g.m, "Plugin.URL", []byte{})
 	if err != nil {
 		log.Error().Err(err).Msg("addon Plugin.URL call failed")
 	}
@@ -88,8 +136,7 @@ func (g *RPC) Login(_ context.Context, r *types.OAuthRequest) (*model.User, stri
 	if err != nil {
 		return nil, "", err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Login", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Login", args)
 	if err != nil {
 		return nil, "", err
 	}
@@ -111,8 +158,7 @@ func (g *RPC) Teams(_ context.Context, u *model.User, p *model.ListOptions) ([]*
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Teams", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Teams", args)
 	if err != nil {
 		return nil, err
 	}
@@ -131,8 +177,7 @@ func (g *RPC) Repo(_ context.Context, u *model.User, remoteID model.ForgeRemoteI
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Repo", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Repo", args)
 	if err != nil {
 		return nil, err
 	}
@@ -153,8 +198,7 @@ func (g *RPC) Repos(_ context.Context, u *model.User, p *model.ListOptions) ([]*
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Repos", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Repos", args)
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +225,7 @@ func (g *RPC) File(_ context.Context, u *model.User, r *model.Repo, b *model.Pip
 	if err != nil {
 		return nil, err
 	}
-	var resp []byte
-	return resp, g.client.Call("Plugin.File", args, &resp)
+	return callRPC[[]byte](g.m, "Plugin.File", args)
 }
 
 func (g *RPC) Dir(_ context.Context, u *model.User, r *model.Repo, b *model.Pipeline, f string) ([]*types.FileMeta, error) {
@@ -195,8 +238,7 @@ func (g *RPC) Dir(_ context.Context, u *model.User, r *model.Repo, b *model.Pipe
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Dir", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Dir", args)
 	if err != nil {
 		return nil, err
 	}
@@ -214,8 +256,8 @@ func (g *RPC) Status(_ context.Context, u *model.User, r *model.Repo, b *model.P
 	if err != nil {
 		return err
 	}
-	var jsonResp []byte
-	return g.client.Call("Plugin.Status", args, &jsonResp)
+	_, err = callRPC[[]byte](g.m, "Plugin.Status", args)
+	return err
 }
 
 func (g *RPC) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
@@ -226,8 +268,7 @@ func (g *RPC) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Netrc", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Netrc", args)
 	if err != nil {
 		return nil, err
 	}
@@ -244,8 +285,8 @@ func (g *RPC) Activate(_ context.Context, u *model.User, r *model.Repo, link str
 	if err != nil {
 		return err
 	}
-	var jsonResp []byte
-	return g.client.Call("Plugin.Activate", args, &jsonResp)
+	_, err = callRPC[[]byte](g.m, "Plugin.Activate", args)
+	return err
 }
 
 func (g *RPC) Deactivate(_ context.Context, u *model.User, r *model.Repo, link string) error {
@@ -257,8 +298,8 @@ func (g *RPC) Deactivate(_ context.Context, u *model.User, r *model.Repo, link s
 	if err != nil {
 		return err
 	}
-	var jsonResp []byte
-	return g.client.Call("Plugin.Deactivate", args, &jsonResp)
+	_, err = callRPC[[]byte](g.m, "Plugin.Deactivate", args)
+	return err
 }
 
 func (g *RPC) Branches(_ context.Context, u *model.User, r *model.Repo, p *model.ListOptions) ([]string, error) {
@@ -270,8 +311,7 @@ func (g *RPC) Branches(_ context.Context, u *model.User, r *model.Repo, p *model
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Branches", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Branches", args)
 	if err != nil {
 		return nil, err
 	}
@@ -288,8 +328,7 @@ func (g *RPC) BranchHead(_ context.Context, u *model.User, r *model.Repo, branch
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.BranchHead", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.BranchHead", args)
 	if err != nil {
 		return nil, err
 	}
@@ -306,8 +345,7 @@ func (g *RPC) PullRequests(_ context.Context, u *model.User, r *model.Repo, p *m
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.PullRequests", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.PullRequests", args)
 	if err != nil {
 		return nil, err
 	}
@@ -330,8 +368,7 @@ func (g *RPC) Hook(_ context.Context, r *http.Request) (*model.Repo, *model.Pipe
 	if err != nil {
 		return nil, nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Hook", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Hook", args)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -351,8 +388,7 @@ func (g *RPC) OrgMembership(_ context.Context, u *model.User, org string) (*mode
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.OrgMembership", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.OrgMembership", args)
 	if err != nil {
 		return nil, err
 	}
@@ -368,8 +404,7 @@ func (g *RPC) Org(_ context.Context, u *model.User, org string) (*model.Org, err
 	if err != nil {
 		return nil, err
 	}
-	var jsonResp []byte
-	err = g.client.Call("Plugin.Org", args, &jsonResp)
+	jsonResp, err := callRPC[[]byte](g.m, "Plugin.Org", args)
 	if err != nil {
 		return nil, err
 	}

@@ -210,6 +210,8 @@ linters:
           alias: agent_rpc
         - pkg: go.woodpecker-ci.org/woodpecker/v3/shared/utils
           alias: shared_utils
+        - pkg: go.woodpecker-ci.org/woodpecker/v3/shared/addon
+          alias: shared_addon
         - pkg: go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata
           alias: pipeline_metadata
         - pkg: go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/types/base

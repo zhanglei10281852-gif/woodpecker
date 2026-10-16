@@ -15,6 +15,7 @@
 package addon
 
 import (
+	"errors"
 	"net/rpc"
 
 	"github.com/hashicorp/go-plugin"
@@ -30,6 +31,7 @@ var HandshakeConfig = plugin.HandshakeConfig{
 	MagicCookieValue: "woodpecker-plugin-magic-cookie-value",
 }
 
+// Plugin is the go-plugin implementation served inside an addon subprocess.
 type Plugin struct {
 	Impl log.Service
 }
@@ -38,6 +40,25 @@ func (p *Plugin) Server(*plugin.MuxBroker) (any, error) {
 	return &RPCServer{Impl: p.Impl}, nil
 }
 
-func (*Plugin) Client(_ *plugin.MuxBroker, c *rpc.Client) (any, error) {
-	return &RPC{client: c}, nil
+func (*Plugin) Client(_ *plugin.MuxBroker, _ *rpc.Client) (any, error) {
+	// Calls are routed through the addon lifecycle [Manager], which owns one
+	// net/rpc client per subprocess generation and swaps them on restart.
+	return &RPC{}, nil
+}
+
+// hostPlugin is used on the Woodpecker server side: it hands the net/rpc
+// client of the freshly started subprocess to its bind callback. The dispensed
+// value is not used, all calls go through the stable RPC wrapper driven by the
+// addon lifecycle Manager.
+type hostPlugin struct {
+	bind func(c *rpc.Client)
+}
+
+func (*hostPlugin) Server(*plugin.MuxBroker) (any, error) {
+	return nil, errors.New("log addon host plugin must not be served inside an addon subprocess")
+}
+
+func (p *hostPlugin) Client(_ *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	p.bind(c)
+	return struct{}{}, nil
 }
